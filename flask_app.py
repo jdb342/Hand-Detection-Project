@@ -1,11 +1,29 @@
-from flask import Flask, Response, render_template_string
+from flask import Flask, Response, render_template_string, render_template
 import cv2
 import mediapipe as mp
 import time
 import numpy as np
 import csv
+from sklearn.cluster import KMeans
+import warnings
+
+warnings.filterwarnings("ignore", category=UserWarning)
 
 app = Flask(__name__)
+current_gesture = "none"
+
+# Intialize gesture names
+gestures = [
+"fist",
+"open_hand"
+]
+ 
+# Initialize K-Means model
+X = np.loadtxt("gesture_data.csv", delimiter = ",")
+kmeans = KMeans(n_clusters = 2, random_state = 0)
+kmeans.fit(X)
+centroids = kmeans.cluster_centers_
+print(centroids)
 
 # Initialize MediaPipe Hands
 mp_hands = mp.solutions.hands
@@ -28,19 +46,37 @@ HTML_PAGE = """
 <body>
 <h1>Hand Detection Live Stream</h1>
 <img src="{{ url_for('video_feed') }}">
-<button onclick="fetch('/capture')">Catpure Image</button>
+<button onclick="fetch('/capture')">
+Catpure Image
+</button>
+<p>Detected Gesture: <span id="gesture">None</span><p>
+<script>
+setInterval(() => {
+	fetch('/gesture')
+		.then(response => response.text())
+		.then(data => {
+			document.getElementById('gesture').innerText = data;
+		});
+}, 500); //update every 500 ms
+</script>
 </body>
 </html>
 """
 
 r_capture = False
 
+# To capture moments
 @app.route('/capture')
 def capture():
 	global r_capture
 	r_capture = True
 	return "Capture requested"
-
+	
+# Displays gesture live on web page
+@app.route('/gesture')
+def gesture(): 
+	return current_gesture
+	
 def normalize_landmarks(coords,label):
 	# Takes list of landmarks: list of (x, y) tuples, length 21
 	# and outputs normalized landmarks in array
@@ -71,12 +107,11 @@ def normalize_landmarks(coords,label):
 		normalized.append(x / scale)
 		normalized.append(y / scale)
 	
-
-		
 	return np.array(normalized)
 
 def gen_frames():
 	global r_capture
+	global current_gesture
 	
 	while True:
 		success, frame = cap.read()
@@ -98,10 +133,22 @@ def gen_frames():
 					results.multi_handedness):
 						
 				label = handedness.classification[0].label
-			            
-			# Output landmarks into terminal every .5 seconds
+			
+			# Maybe this is the distances away from each centroid
+			distances = np.linalg.norm(
+							X - kmeans.cluster_centers_[kmeans.labels_],
+							axis = 1
+						)
+						
+			thresholds = {}
+			
+			for i in range(kmeans.n_clusters):
+				cluster_dists = distances[kmeans.labels_ == i]
+				thresholds[i] = cluster_dists.mean() + 1 * cluster_dists.std()
+			
 			if r_capture:
 				
+				# Create list of coords, list of [x, y]
 				handLms = results.multi_hand_landmarks[0]
 				coords = []
 									
@@ -110,16 +157,29 @@ def gen_frames():
 					
 				normalized_array = normalize_landmarks(coords, label)
 				
-				print(normalized_array)
-				
 				# Enter into csv file gesture_data.csv
-				with open('/home/jb26/gesture-project-coding/gesture_data.csv', 'a', newline='') as csvfile:
-					csv_writer = csv.writer(csvfile)
-					csv_writer.writerow(normalized_array)
+				# with open('/home/jb26/gesture-project-coding/gesture_data.csv', 'a', newline='') as csvfile:
+					# csv_writer = csv.writer(csvfile)
+					# csv_writer.writerow(normalized_array)
 				
-				print(label)
+				# Change this if wanting to switch to constant feed
 				r_capture = False
 				
+				sample = normalized_array.reshape(1,-1)
+				
+				# Assign to cluster and get center 
+				cluster_id = kmeans.predict(sample)[0]
+				center = kmeans.cluster_centers_[cluster_id]
+				
+				# Distance from cluster to center
+				distance = np.linalg.norm(sample - center)
+				
+				# Check how far away current hand is from thresholds
+				if thresholds[cluster_id] - distance < .25:
+					current_gesture = "Unknown"
+				else:
+					current_gesture = gestures[cluster_id]
+					
 		# Encode frame as JPEG
 		ret, buffer = cv2.imencode('.jpg', frame)
 		frame_bytes = buffer.tobytes()
